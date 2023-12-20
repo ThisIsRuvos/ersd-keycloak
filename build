@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+mkdir -p tmp
+
+path_ersd_theme=themes
+docker_tag=$(echo ersd/ersd-keycloak | tr '[:upper:]' '[:lower:]')
+
+docker build \
+  --build-arg kc_version=7.0.0 \
+  --build-arg path_ersd_theme=$path_ersd_theme \
+  -t $docker_tag .;
+
+rm -rf tmp

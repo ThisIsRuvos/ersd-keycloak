@@ -7,6 +7,7 @@ read -p 'Username: (admin) ' username
 read -s -p $'Password: (admin) \n' password
 read -p 'Realm: (ersd) ' realm
 read -p 'Client: (ersd-app) ' client
+read -p 'Admin Client: (ersd-admin) ' admin_client
 read -p 'Redirect URIs: (["*"]) ' redirect_uris
 read -p 'Web Origins: (["*"])' web_origins
 
@@ -15,6 +16,7 @@ username=${username:-admin}
 password=${password:-admin}
 realm=${realm:-ersd}
 client=${client:-ersd-app}
+admin_client=${admin_client:-ersd-admin}
 redirect_uris=${redirect_uris:-'["*"]'}
 web_origins=${web_origins:-'["*"]'}
 
@@ -35,6 +37,9 @@ curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$tok
 
 echo 'Creating client '$client' on realm '$realm'...'
 curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
+
+echo 'Creating admin client '$admin_client' on realm '$realm'...'
+curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$admin_client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
 
 echo 'Fetching authentication certificate for realm '$realm'...'
 raw_cert=$(curl -H 'Authorization: Bearer '$token $base_url/auth/admin/realms/$realm/keys | jq -r '.keys[] | select(.algorithm == "RS256").certificate')

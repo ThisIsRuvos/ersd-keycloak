@@ -1,8 +1,6 @@
-FROM ubuntu
+FROM jboss/keycloak:15.0.0
 
-RUN apt-get update && \
-  apt-get install -y jq curl
+ARG path_ersd_theme
+COPY $path_ersd_theme /opt/jboss/keycloak/themes/
 
-COPY ./configure ./configure
 
-CMD ["./configure"]

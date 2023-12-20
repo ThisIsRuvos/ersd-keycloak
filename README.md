@@ -27,3 +27,14 @@ Either way, provide `configure` with keycloak credentials and the desired setup 
 - Fetches the authentication certificate for the newly created realm and writes it to standard out
 
 All of these are requirements of the [ERSD Node application](https://gitlab.ruvos.com/ersd/ersd) and should be reflected in the configuration there as well.
+
+#Manual Deployment 
+```bash
+# Build the docker image and tag it for upload
+./build
+
+# Retrieve an authentication token and authenticate your Docker client to your registry. Use the AWS CLI:
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 703861148810.dkr.ecr.us-east-1.amazonaws.com
+# Run the following command to push this image to your newly created AWS repository:
+docker push 703861148810.dkr.ecr.us-east-1.amazonaws.com/ersd/ersd-keycloak:latest
+```
