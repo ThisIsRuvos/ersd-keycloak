@@ -1,5 +1,11 @@
 #!/bin/bash
 
+if ! command -v jq &> /dev/null
+then
+  echo 'jq required'
+  exit 1
+fi
+
 set -e
 
 read -p 'Keycloak Base URL (http://localhost:8080): ' base_url
@@ -20,7 +26,12 @@ admin_client=${admin_client:-ersd-admin}
 redirect_uris=${redirect_uris:-'["*"]'}
 web_origins=${web_origins:-'["*"]'}
 
-res=$(curl -sS --data-urlencode 'username='$username --data-urlencode 'password='$password -d 'grant_type=password&client_id=admin-cli' -X POST $base_url/auth/realms/master/protocol/openid-connect/token)
+res=$(
+  curl -sS -X POST $base_url/auth/realms/master/protocol/openid-connect/token \
+    --data-urlencode 'username='$username \
+    --data-urlencode 'password='$password \
+    -d 'grant_type=password&client_id=admin-cli'
+)
 token=$(echo $res | jq -r '.access_token')
 
 if [ $token == 'null' ]; then
@@ -30,17 +41,80 @@ exit 1
 fi
 
 echo 'Creating realm '$realm'...'
-curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled": true, "id":"'$realm'", "realm":"'$realm'"}' $base_url/auth/admin/realms
+curl -X POST $base_url/auth/admin/realms \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Bearer '$token \
+  -d '{"enabled": true, "id":"'$realm'", "realm":"'$realm'"}'
 
 echo 'Creating admin role on realm '$realm'...'
-curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"name": "admin"}' $base_url/auth/admin/realms/$realm/roles
+curl -X POST $base_url/auth/admin/realms/$realm/roles \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Bearer '$token \
+  -d '{"name": "admin"}'
 
 echo 'Creating client '$client' on realm '$realm'...'
-curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
+curl -X POST $base_url/auth/admin/realms/$realm/clients \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Bearer '$token \
+  -d '{
+        "enabled":true,
+        "webOrigins":'$web_origins',
+        "redirectUris":'$redirect_uris',
+        "clientId":"'$client'",
+        "protocol":"openid-connect"
+      }'
 
-echo 'Creating admin client '$admin_client' on realm '$realm'...'
-curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$admin_client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
 
 echo 'Fetching authentication certificate for realm '$realm'...'
 raw_cert=$(curl -H 'Authorization: Bearer '$token $base_url/auth/admin/realms/$realm/keys | jq -r '.keys[] | select(.algorithm == "RS256").certificate')
 echo '-----BEGIN CERTIFICATE-----\n'$raw_cert'\n-----END CERTIFICATE-----'
+
+
+# res=$(curl -sS --data-urlencode 'username='$username --data-urlencode 'password='$password -d 'grant_type=password&client_id=admin-cli' -X POST $base_url/auth/realms/master/protocol/openid-connect/token)
+# token=$(echo $res | jq -r '.access_token')
+ res=$(curl -sS --data-urlencode 'username='$username --data-urlencode 'password='$password -d 'grant_type=password&client_id=admin-cli' -X POST $base_url/auth/realms/master/protocol/openid-connect/token)
+# token=$(echo $res | jq -r '.access_token')
+
+# if [ $token == 'null' ]; then
+# echo 'Unable to fetch token.'
+# echo $res
+# exit 1
+# fi
+
+# echo 'Creating realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled": true, "id":"'$realm'", "realm":"'$realm'"}' $base_url/auth/admin/realms
+
+# echo 'Creating admin role on realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"name": "admin"}' $base_url/auth/admin/realms/$realm/roles
+
+# echo 'Creating client '$client' on realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
+
+# echo 'Creating admin client '$admin_client' on realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$admin_client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
+
+# echo 'Fetching authentication certificate for realm '$realm'...'
+# raw_cert=$(curl -H 'Authorization: Bearer '$token $base_url/auth/admin/realms/$realm/keys | jq -r '.keys[] | select(.algorithm == "RS256").certificate')
+# echo '-----BEGIN CERTIFICATE-----\n'$raw_cert'\n-----END CERTIFICATE-----'
+
+# if [ $token == 'null' ]; then
+# echo 'Unable to fetch token.'
+# echo $res
+# exit 1
+# fi
+
+# echo 'Creating realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled": true, "id":"'$realm'", "realm":"'$realm'"}' $base_url/auth/admin/realms
+
+# echo 'Creating admin role on realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"name": "admin"}' $base_url/auth/admin/realms/$realm/roles
+
+# echo 'Creating client '$client' on realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
+
+# echo 'Creating admin client '$admin_client' on realm '$realm'...'
+# curl -X POST -H 'content-type: application/json' -H 'Authorization: Bearer '$token -d '{"enabled":true,"webOrigins":'$web_origins',"redirectUris":'$redirect_uris',"clientId":"'$admin_client'","protocol":"openid-connect"}' $base_url/auth/admin/realms/$realm/clients
+
+# echo 'Fetching authentication certificate for realm '$realm'...'
+# raw_cert=$(curl -H 'Authorization: Bearer '$token $base_url/auth/admin/realms/$realm/keys | jq -r '.keys[] | select(.algorithm == "RS256").certificate')
+# echo '-----BEGIN CERTIFICATE-----\n'$raw_cert'\n-----END CERTIFICATE-----'

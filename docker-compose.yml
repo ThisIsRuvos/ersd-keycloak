@@ -1,0 +1,49 @@
+services:
+
+  kcdb:
+    image: mysql:8.0.23
+    # platform: linux/x86_64
+    container_name: ersd_kcdb
+    volumes:
+      - kcdb_data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${KEYCLOAK_DB_DATABASE}
+      MYSQL_USER: ${KEYCLOAK_DB_USER}
+      MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    ports:
+      - 3306:3306
+    expose:
+      - 3306
+  keycloak:
+    container_name: ersd_keycloak
+    build:
+      dockerfile: Dockerfile
+    environment:
+      KC_DB: mysql
+      KC_DB_URL_HOST: kcdb
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_PASSWORD}
+      KC_HOSTNAME_STRICT: false
+      KC_HTTP_ENABLED: true
+      KC_HTTP_RELATIVE_PATH: /auth
+      JDBC_PARAMS: useSSL=true
+      KC_HEALTH_ENABLED: true
+    ports:
+      - 8080:8080
+      - 8443:8443
+    restart: on-failure:3
+    # depends_on:
+    #   - kcdb
+    # volumes:
+    #   - ./themes:/opt/keycloak/themes/ersd
+
+volumes:
+  kcdb_data:
+    driver: local
+
+
+

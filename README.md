@@ -28,7 +28,7 @@ Either way, provide `configure` with keycloak credentials and the desired setup 
 
 All of these are requirements of the [ERSD Node application](https://gitlab.ruvos.com/ersd/ersd) and should be reflected in the configuration there as well.
 
-#Manual Deployment 
+# Manual Deployment 
 ```bash
 # Build the docker image and tag it for upload
 ./build
@@ -37,4 +37,12 @@ All of these are requirements of the [ERSD Node application](https://gitlab.ruvo
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 703861148810.dkr.ecr.us-east-1.amazonaws.com
 # Run the following command to push this image to your newly created AWS repository:
 docker push 703861148810.dkr.ecr.us-east-1.amazonaws.com/ersd/ersd-keycloak:latest
+```
+
+# Local Development
+
+This is a simple docker-compose file that will run the keycloak container and a mysql container. 
+
+```bash
+docker-compose up
 ```

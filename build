@@ -2,7 +2,7 @@
 
 mkdir -p tmp
 
-path_ersd_theme=themes
+path_ersd_theme=themes_2_1_1
 docker_tag=$(echo ersd/ersd-keycloak | tr '[:upper:]' '[:lower:]')
 
 docker build \
