@@ -32,6 +32,8 @@ services:
       KC_HTTP_RELATIVE_PATH: /auth
       JDBC_PARAMS: useSSL=true
       KC_HEALTH_ENABLED: true
+      # Disable clustering for single instance
+      KC_CACHE: local
     ports:
       - 8080:8080
       - 8443:8443

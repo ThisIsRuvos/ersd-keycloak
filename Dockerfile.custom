@@ -1,0 +1,55 @@
+# Multi-stage build for custom Keycloak with updated dependencies
+
+# Stage 1: Clone and build Keycloak with updated dependencies
+FROM ubuntu:22.04 AS builder
+
+# Install required tools (glibc-based for Node.js compatibility)
+RUN apt-get update && \
+    apt-get install -y git maven openjdk-17-jdk wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Clone Keycloak source
+RUN git clone --depth 1 --branch 26.4.6 https://github.com/keycloak/keycloak.git /keycloak-source
+
+WORKDIR /keycloak-source
+
+# Set Java 17 as default
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="$JAVA_HOME/bin:$PATH"
+
+# Update dependency versions in the parent pom.xml
+RUN sed -i 's|<quarkus\.version>3\.27\.0</quarkus\.version>|<quarkus.version>3.30.1</quarkus.version>|g' pom.xml && \
+    sed -i 's|<quarkus\.build\.version>3\.27\.0</quarkus\.build\.version>|<quarkus.build.version>3.30.1</quarkus.build.version>|g' pom.xml
+
+# Build Keycloak (this will take a while) - only build the quarkus distribution
+RUN mvn clean install -DskipTests -DskipExamples -DskipTestsuite -Dmaven.javadoc.skip=true -q -pl quarkus/dist -am
+
+# Verify the build artifact exists
+RUN ls -la /keycloak-source/quarkus/dist/target/ || echo "Build artifacts:" && find /keycloak-source -name "*.tar.gz" | head -5
+
+# Stage 2: Extract the built Keycloak distribution
+FROM ubuntu:22.04 AS extractor
+
+# Copy the build artifact
+COPY --from=builder /keycloak-source/quarkus/dist/target/keycloak-26.4.6.tar.gz /tmp/
+
+# Verify the file was copied and extract it
+RUN ls -la /tmp/ && tar -xzf /tmp/keycloak-26.4.6.tar.gz -C /tmp/ && mv /tmp/keycloak-26.4.6 /tmp/keycloak-extracted
+RUN tar -xzf /tmp/keycloak-26.4.6.tar.gz -C /tmp/ && \
+    mv /tmp/keycloak-26.4.6 /tmp/keycloak-extracted
+
+# Stage 3: Create the final Docker image
+FROM quay.io/keycloak/keycloak:26.4 AS base
+
+# Copy the extracted Keycloak installation
+COPY --from=extractor /tmp/keycloak-extracted /opt/keycloak
+
+# Configure Keycloak
+ENV KC_DB=mysql
+ENV KC_HTTP_RELATIVE_PATH=/auth
+
+# Copy custom themes
+COPY ./themes/ /opt/keycloak/themes/
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start"]

@@ -1,0 +1,46 @@
+# Download JAR dependencies and modify quarkus-run.jar
+FROM alpine:latest AS downloader
+
+RUN apk add --no-cache wget unzip zip
+
+# Download JAR dependencies
+RUN mkdir -p /downloads && \
+    wget -O /downloads/vertx-web-5.0.5.jar \
+    https://repo1.maven.org/maven2/io/vertx/vertx-web/5.0.5/vertx-web-5.0.5.jar && \
+    wget -O /downloads/vertx-web-common-5.0.5.jar \
+    https://repo1.maven.org/maven2/io/vertx/vertx-web-common/5.0.5/vertx-web-common-5.0.5.jar && \
+    wget -O /downloads/quarkus-jdbc-mssql-deployment-3.28.5.jar \
+    https://repo1.maven.org/maven2/io/quarkus/quarkus-jdbc-mssql-deployment/3.28.5/quarkus-jdbc-mssql-deployment-3.28.5.jar
+
+# Extract quarkus-run.jar and modify application data files
+COPY --from=quay.io/keycloak/keycloak:26.4 /opt/keycloak/lib/quarkus-run.jar /downloads/quarkus-run.jar
+COPY --from=quay.io/keycloak/keycloak:26.4 /opt/keycloak/lib/deployment/appmodel.dat /downloads/appmodel.dat
+COPY --from=quay.io/keycloak/keycloak:26.4 /opt/keycloak/lib/deployment/deployment-class-path.dat /downloads/deployment-class-path.dat
+
+RUN mkdir -p /tmp/jar-extract && \
+    cd /tmp/jar-extract && \
+    unzip /downloads/quarkus-run.jar && \
+    # Update version references in data files (this is a simplified approach) \
+    sed -i 's/4\.5\.21/5.0.5/g' META-INF/MANIFEST.MF 2>/dev/null || true && \
+    zip -r /downloads/quarkus-run.jar . && \
+    cd / && rm -rf /tmp/jar-extract
+
+# Main Keycloak image
+FROM quay.io/keycloak/keycloak:26.4
+
+# Copy updated JAR files
+COPY --from=downloader /downloads/vertx-web-5.0.5.jar /opt/keycloak/lib/lib/main/io.vertx-web-5.0.5.jar
+COPY --from=downloader /downloads/vertx-web-common-5.0.5.jar /opt/keycloak/lib/lib/main/io.vertx-web-common-5.0.5.jar
+COPY --from=downloader /downloads/quarkus-jdbc-mssql-deployment-3.28.5.jar /opt/keycloak/lib/lib/deployment/io.quarkus-jdbc-mssql-deployment-3.28.5.jar
+
+# Copy modified quarkus-run.jar
+COPY --from=downloader /downloads/quarkus-run.jar /opt/keycloak/lib/quarkus-run.jar
+
+# Configure Keycloak
+ENV KC_DB=mysql
+ENV KC_HTTP_RELATIVE_PATH=/auth
+
+# Copy custom themes
+COPY ./themes/ /opt/keycloak/themes/
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start"]
