@@ -1,52 +1,54 @@
-# Download JAR dependencies in a separate stage
-FROM alpine:latest AS downloader
+# Keycloak 26.7.0 remediates the Java CVEs flagged by AWS Inspector on the 26.4
+# image (keycloak-services, netty, jackson-databind, mssql-jdbc, bouncycastle,
+# postgresql, vertx). The OS-level findings (glibc, java-21-openjdk-headless,
+# libcap, libtasn1, p11-kit-trust) are patched below with dnf, since Red Hat
+# shipped those errata after the upstream image was built.
+# Stage 1: upgrade RPMs inside the Keycloak rootfs using UBI9's dnf
+# (the Keycloak image is ubi9-micro based and has no package manager)
+FROM registry.access.redhat.com/ubi9:latest AS os-patch
 
-RUN apk add --no-cache wget
+COPY --from=quay.io/keycloak/keycloak:26.7.0 / /mnt/rootfs
 
-RUN mkdir -p /downloads && \
-    wget -O /downloads/vertx-web-5.0.5.jar \
-    https://repo1.maven.org/maven2/io/vertx/vertx-web/5.0.5/vertx-web-5.0.5.jar && \
-    wget -O /downloads/vertx-web-common-5.0.5.jar \
-    https://repo1.maven.org/maven2/io/vertx/vertx-web-common/5.0.5/vertx-web-common-5.0.5.jar && \
-    wget -O /downloads/quarkus-jdbc-mssql-deployment-3.28.5.jar \
-    https://repo1.maven.org/maven2/io/quarkus/quarkus-jdbc-mssql-deployment/3.28.5/quarkus-jdbc-mssql-deployment-3.28.5.jar
+RUN dnf -y upgrade --installroot /mnt/rootfs --releasever 9 \
+        --setopt=install_weak_deps=0 --nodocs && \
+    dnf clean all --installroot /mnt/rootfs && \
+    rm -rf /mnt/rootfs/var/cache/dnf /mnt/rootfs/var/log/dnf* /mnt/rootfs/var/log/yum*
 
-# Stage 2: Extract and modify quarkus-run.jar
-FROM ubuntu:22.04 AS modifier
+# Swap in patched jars for CVEs not yet fixed upstream in Keycloak 26.7.0:
+# - jackson-databind 2.21.5 (CVE-2026-54512/54513/54518, PTV allow-list bypass)
+# - opentelemetry-api 1.62.0 (CVE-2026-45292)
+# The original filenames are kept because the Quarkus fast-jar classpath
+# (lib/quarkus/quarkus-application.dat) references jars by exact path.
+# Scanners read the version from the jar's embedded pom.properties.
+RUN curl -fsSL -o /mnt/rootfs/opt/keycloak/lib/lib/main/com.fasterxml.jackson.core.jackson-databind-2.21.2.jar \
+        https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.21.5/jackson-databind-2.21.5.jar && \
+    curl -fsSL -o /mnt/rootfs/opt/keycloak/lib/lib/main/io.opentelemetry.opentelemetry-api-1.57.0.jar \
+        https://repo1.maven.org/maven2/io/opentelemetry/opentelemetry-api/1.62.0/opentelemetry-api-1.62.0.jar && \
+    curl -fsSL -o /mnt/rootfs/opt/keycloak/lib/lib/main/io.opentelemetry.opentelemetry-api-incubator-1.57.0-alpha.jar \
+        https://repo1.maven.org/maven2/io/opentelemetry/opentelemetry-api-incubator/1.62.0-alpha/opentelemetry-api-incubator-1.62.0-alpha.jar
 
-# Install unzip and zip tools
-RUN apt-get update && apt-get install -y unzip zip && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Remove the admin CLI uber-jar (kcadm/kcreg): it bundles its own vulnerable
+# jackson-databind and is not used by the server. Realm setup is done from the
+# host via the configure script.
+RUN rm -rf /mnt/rootfs/opt/keycloak/bin/client \
+        /mnt/rootfs/opt/keycloak/bin/kcadm.sh /mnt/rootfs/opt/keycloak/bin/kcadm.bat \
+        /mnt/rootfs/opt/keycloak/bin/kcreg.sh /mnt/rootfs/opt/keycloak/bin/kcreg.bat
 
-# Copy Keycloak files
-COPY --from=quay.io/keycloak/keycloak:26.4 /opt/keycloak /opt/keycloak
+# Final image: patched rootfs with the original Keycloak image settings
+FROM scratch
 
-# Copy downloaded JAR files
-COPY --from=downloader /downloads/vertx-web-5.0.5.jar /opt/keycloak/lib/lib/main/io.vertx-web-5.0.5.jar
-COPY --from=downloader /downloads/vertx-web-common-5.0.5.jar /opt/keycloak/lib/lib/main/io.vertx-web-common-5.0.5.jar
-COPY --from=downloader /downloads/quarkus-jdbc-mssql-deployment-3.28.5.jar /opt/keycloak/lib/lib/deployment/io.quarkus.quarkus-jdbc-mssql-deployment-3.28.5.jar
+COPY --from=os-patch /mnt/rootfs/ /
 
-# Update MANIFEST.MF in quarkus-run.jar
-RUN mkdir -p /tmp/jar-extract && \
-    cd /tmp/jar-extract && \
-    unzip /opt/keycloak/lib/quarkus-run.jar && \
-    sed -i 's|io\.vertx\.vertx-web-4\.5\.21\.jar|io.vertx-web-5.0.5.jar|g' META-INF/MANIFEST.MF && \
-    sed -i 's|io\.vertx\.vertx-web-common-4\.5\.21\.jar|io.vertx-web-common-5.0.5.jar|g' META-INF/MANIFEST.MF && \
-    sed -i 's|io\.quarkus\.quarkus-jdbc-mssql-deployment-3\.27\.0\.jar|io.quarkus.quarkus-jdbc-mssql-deployment-3.28.5.jar|g' META-INF/MANIFEST.MF && \
-    zip -r /opt/keycloak/lib/quarkus-run.jar . && \
-    cd / && rm -rf /tmp/jar-extract
-
-# Final image
-FROM quay.io/keycloak/keycloak:26.4
-
-# Copy modified files from modifier stage
-COPY --from=modifier /opt/keycloak/lib/lib/main/io.vertx-web-5.0.5.jar /opt/keycloak/lib/lib/main/io.vertx-web-5.0.5.jar
-COPY --from=modifier /opt/keycloak/lib/lib/main/io.vertx-web-common-5.0.5.jar /opt/keycloak/lib/lib/main/io.vertx-web-common-5.0.5.jar
-COPY --from=modifier /opt/keycloak/lib/lib/deployment/io.quarkus.quarkus-jdbc-mssql-deployment-3.28.5.jar /opt/keycloak/lib/lib/deployment/io.quarkus.quarkus-jdbc-mssql-deployment-3.28.5.jar
-COPY --from=modifier /opt/keycloak/lib/quarkus-run.jar /opt/keycloak/lib/quarkus-run.jar
+ENV PATH=/opt/keycloak/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=en_US.UTF-8 \
+    KC_RUN_IN_CONTAINER=true
 
 ENV KC_DB=mysql
 ENV KC_HTTP_RELATIVE_PATH=/auth
 
 COPY ./themes/ /opt/keycloak/themes/
+
+USER 1000
+EXPOSE 8080 8443 9000
 
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start"]
