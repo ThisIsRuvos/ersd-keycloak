@@ -1,2 +1,6 @@
+<<<<<<< HEAD
+.env
+=======
 .env
 .tmp-gitlab-mirror-key/
+>>>>>>> origin/master
