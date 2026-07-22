@@ -1,0 +1,33 @@
+name: Mirror to GitLab
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - '**'
+  release:
+    types: [published]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure SSH for GitLab
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.GITLAB_DEPLOY_KEY }}" > ~/.ssh/gitlab_deploy_key
+          chmod 600 ~/.ssh/gitlab_deploy_key
+          ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+
+      - name: Push mirror to GitLab
+        env:
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/gitlab_deploy_key -o IdentitiesOnly=yes"
+        run: |
+          git remote add gitlab git@gitlab.com:aphl_aims/devteam/ersd-keycloak.git || true
+          git push gitlab refs/remotes/origin/master:refs/heads/master --tags --force
