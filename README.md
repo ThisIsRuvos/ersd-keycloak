@@ -28,10 +28,16 @@ Either way, provide `configure` with keycloak credentials and the desired setup 
 
 All of these are requirements of the [ERSD Node application](https://gitlab.ruvos.com/ersd/ersd) and should be reflected in the configuration there as well.
 
+# Production upgrade (26.7.3 / Inspector remediation)
+
+Use the full runbook, including RDS snapshot, verification, and backout:
+
+[docs/PRODUCTION-UPGRADE-26.7.3.md](docs/PRODUCTION-UPGRADE-26.7.3.md)
+
 # Manual Deployment 
 ```bash
-# Build the docker image and tag it for upload
-./build
+# Single linux/amd64 image (no attestation sub-images in ECR)
+./build 26.7.3
 
 # Retrieve an authentication token and authenticate your Docker client to your registry. Use the AWS CLI:
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 703861148810.dkr.ecr.us-east-1.amazonaws.com

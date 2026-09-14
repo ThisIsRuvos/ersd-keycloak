@@ -1,31 +1,65 @@
-# Keycloak 26.7.0 remediates the Java CVEs flagged by AWS Inspector on the 26.4
-# image (keycloak-services, netty, jackson-databind, mssql-jdbc, bouncycastle,
-# postgresql, vertx). The OS-level findings (glibc, java-21-openjdk-headless,
-# libcap, libtasn1, p11-kit-trust) are patched below with dnf, since Red Hat
-# shipped those errata after the upstream image was built.
+# Keycloak 26.7.3 remediates CVE-2026-18963 (keycloak-services account takeover)
+# and the 26.7.2/26.7.3 server CVEs. Remaining Inspector findings are OS RPMs
+# (patched via UBI9 dnf) and third-party jars not yet bumped upstream (overlaid
+# below). The 26.6.0 ORG_ID changeset has no precondition and fails when
+# upgrading a 26.0.x MySQL schema that already has KEYCLOAK_GROUP.ORG_ID.
 # Stage 1: upgrade RPMs inside the Keycloak rootfs using UBI9's dnf
 # (the Keycloak image is ubi9-micro based and has no package manager)
 FROM registry.access.redhat.com/ubi9:latest AS os-patch
 
-COPY --from=quay.io/keycloak/keycloak:26.7.0 / /mnt/rootfs
+COPY --from=quay.io/keycloak/keycloak:26.7.3 / /mnt/rootfs
 
 RUN dnf -y upgrade --installroot /mnt/rootfs --releasever 9 \
         --setopt=install_weak_deps=0 --nodocs && \
+    dnf -y install zip unzip python3 && \
     dnf clean all --installroot /mnt/rootfs && \
     rm -rf /mnt/rootfs/var/cache/dnf /mnt/rootfs/var/log/dnf* /mnt/rootfs/var/log/yum*
 
-# Swap in patched jars for CVEs not yet fixed upstream in Keycloak 26.7.0:
-# - jackson-databind 2.21.5 (CVE-2026-54512/54513/54518, PTV allow-list bypass)
-# - opentelemetry-api 1.62.0 (CVE-2026-45292)
-# The original filenames are kept because the Quarkus fast-jar classpath
-# (lib/quarkus/quarkus-application.dat) references jars by exact path.
+# Make 26.6.0-org-group-relationship idempotent, then add the FK/index if missing.
+# MySQL commits DDL outside Liquibase transactions, so a prior failed 26.7 start
+# can leave ORG_ID in place without a DATABASECHANGELOG row.
+COPY scripts/patch-jpa-changelog.py /tmp/patch-jpa-changelog.py
+RUN <<'EOS'
+set -eu
+JAR=$(ls /mnt/rootfs/opt/keycloak/lib/lib/main/org.keycloak.keycloak-model-jpa-*.jar)
+mkdir -p /tmp/jpa
+cd /tmp/jpa
+unzip -qo "$JAR" META-INF/jpa-changelog-26.6.0.xml
+python3 /tmp/patch-jpa-changelog.py META-INF/jpa-changelog-26.6.0.xml
+zip -q "$JAR" META-INF/jpa-changelog-26.6.0.xml
+EOS
+
+# Overlay patched jars. Original filenames are kept because the Quarkus fast-jar
+# classpath (lib/quarkus/quarkus-application.dat) references jars by exact path.
 # Scanners read the version from the jar's embedded pom.properties.
-RUN curl -fsSL -o /mnt/rootfs/opt/keycloak/lib/lib/main/com.fasterxml.jackson.core.jackson-databind-2.21.2.jar \
-        https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.21.5/jackson-databind-2.21.5.jar && \
-    curl -fsSL -o /mnt/rootfs/opt/keycloak/lib/lib/main/io.opentelemetry.opentelemetry-api-1.57.0.jar \
-        https://repo1.maven.org/maven2/io/opentelemetry/opentelemetry-api/1.62.0/opentelemetry-api-1.62.0.jar && \
-    curl -fsSL -o /mnt/rootfs/opt/keycloak/lib/lib/main/io.opentelemetry.opentelemetry-api-incubator-1.57.0-alpha.jar \
-        https://repo1.maven.org/maven2/io/opentelemetry/opentelemetry-api-incubator/1.62.0-alpha/opentelemetry-api-incubator-1.62.0-alpha.jar
+RUN set -eu; \
+    LIB=/mnt/rootfs/opt/keycloak/lib/lib/main; \
+    overlay() { \
+      prefix="$1"; group_path="$2"; artifact="$3"; version="$4"; classifier="${5:-}"; \
+      dest=$(ls -1 "$LIB"/${prefix}-*.jar 2>/dev/null | head -n1 || true); \
+      if [ -z "$dest" ]; then echo "skip $prefix (not present)"; return 0; fi; \
+      if [ -n "$classifier" ]; then \
+        url="https://repo1.maven.org/maven2/${group_path}/${artifact}/${version}/${artifact}-${version}-${classifier}.jar"; \
+      else \
+        url="https://repo1.maven.org/maven2/${group_path}/${artifact}/${version}/${artifact}-${version}.jar"; \
+      fi; \
+      echo "overlay $dest <- ${artifact}-${version}${classifier:+-${classifier}}"; \
+      curl -fsSL -o "$dest" "$url"; \
+    }; \
+    overlay io.netty.netty-codec io/netty netty-codec 4.1.138.Final; \
+    overlay io.netty.netty-codec-dns io/netty netty-codec-dns 4.1.138.Final; \
+    overlay io.netty.netty-codec-http io/netty netty-codec-http 4.1.138.Final; \
+    overlay io.netty.netty-codec-http2 io/netty netty-codec-http2 4.1.138.Final; \
+    overlay io.netty.netty-codec-haproxy io/netty netty-codec-haproxy 4.1.138.Final; \
+    overlay io.netty.netty-handler io/netty netty-handler 4.1.138.Final; \
+    overlay com.fasterxml.jackson.core.jackson-databind com/fasterxml/jackson/core jackson-databind 2.21.6; \
+    overlay com.fasterxml.jackson.core.jackson-core com/fasterxml/jackson/core jackson-core 2.21.6; \
+    overlay io.opentelemetry.opentelemetry-api io/opentelemetry opentelemetry-api 1.62.0; \
+    overlay io.opentelemetry.opentelemetry-api-incubator io/opentelemetry opentelemetry-api-incubator 1.62.0-alpha; \
+    overlay io.micrometer.micrometer-core io/micrometer micrometer-core 1.16.7; \
+    overlay org.postgresql.postgresql org/postgresql postgresql 42.7.13; \
+    overlay org.mariadb.jdbc.mariadb-java-client org/mariadb/jdbc mariadb-java-client 3.5.10; \
+    overlay com.microsoft.sqlserver.mssql-jdbc com/microsoft/sqlserver mssql-jdbc 13.6.0.jre11
 
 # Remove the admin CLI uber-jar (kcadm/kcreg): it bundles its own vulnerable
 # jackson-databind and is not used by the server. Realm setup is done from the
