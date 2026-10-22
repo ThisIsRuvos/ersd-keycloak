@@ -15,6 +15,66 @@ RUN dnf -y upgrade --installroot /mnt/rootfs --releasever 9 \
     dnf clean all --installroot /mnt/rootfs && \
     rm -rf /mnt/rootfs/var/cache/dnf /mnt/rootfs/var/log/dnf* /mnt/rootfs/var/log/yum*
 
+# Distrust the eMudhra roots until RHEL ca-certificates drops them (DSO-3028).
+# Java reads /etc/pki/ca-trust/extracted/java/cacerts. The Keycloak rootfs is
+# UBI micro and its trust binary has no libp11-kit, so the builder p11-kit
+# applies the blocklist to a copy of the rootfs anchors and writes the
+# regenerated store back. Other emSign roots stay trusted.
+# https://emudhra.we-have-a-problem.com/ (Fedora/RHEL workaround)
+RUN <<'EOS'
+set -euo pipefail
+
+src_anchors=/mnt/rootfs/usr/share/pki/ca-trust-source
+src_admin=/mnt/rootfs/etc/pki/ca-trust/source
+if [ ! -d "$src_anchors" ] || [ ! -d "$src_admin" ]; then
+  echo "Keycloak rootfs is missing the OS trust source" >&2
+  exit 1
+fi
+
+rm -rf /usr/share/pki/ca-trust-source /etc/pki/ca-trust/source
+cp -a "$src_anchors" /usr/share/pki/ca-trust-source
+cp -a "$src_admin" /etc/pki/ca-trust/source
+
+blocklist=/etc/pki/ca-trust/source/blocklist
+mkdir -p "$blocklist"
+extract_root() {
+  filter="$1"
+  out="$2"
+  trust extract --overwrite --format=pem-bundle --filter="$filter" "$out"
+  if ! grep -q 'BEGIN CERTIFICATE' "$out"; then
+    echo "no certificate extracted for $filter" >&2
+    exit 1
+  fi
+}
+extract_root 'pkcs11:object=Comodo%20AAA%20Services%20root;type=cert' \
+  "$blocklist/Comodo_AAA_Services_root.pem"
+extract_root 'pkcs11:object=emSign%20ECC%20Root%20CA%20-%20G3;type=cert' \
+  "$blocklist/emSign_ECC_Root_CA_-_G3.pem"
+
+mkdir -p /mnt/rootfs/etc/pki/ca-trust/source/blocklist
+cp -a "$blocklist/." /mnt/rootfs/etc/pki/ca-trust/source/blocklist/
+
+rm -rf /tmp/ca-extracted
+update-ca-trust extract -o /tmp/ca-extracted
+cp -a /tmp/ca-extracted/. /mnt/rootfs/etc/pki/ca-trust/extracted/
+
+if trust list --filter=ca-anchors | grep -E 'emSign ECC Root CA - G3|Comodo AAA Services root|AAA Certificate Services'; then
+  echo "affected roots are still anchors" >&2
+  exit 1
+fi
+
+aliases=$(chroot /mnt/rootfs /usr/bin/keytool -list -cacerts -storepass changeit)
+if printf '%s\n' "$aliases" | grep -q 'emsigneccrootca-g3'; then
+  echo "emSign ECC Root CA - G3 is still in Java cacerts" >&2
+  exit 1
+fi
+if printf '%s\n' "$aliases" | grep -q 'aaacertificateservices'; then
+  echo "AAA Certificate Services is still in Java cacerts" >&2
+  exit 1
+fi
+echo "CA blocklist applied: emSign ECC Root CA - G3 and Comodo AAA Services root are not anchors"
+EOS
+
 # Make 26.6.0-org-group-relationship idempotent, then add the FK/index if missing.
 # MySQL commits DDL outside Liquibase transactions, so a prior failed 26.7 start
 # can leave ORG_ID in place without a DATABASECHANGELOG row.
