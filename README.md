@@ -34,6 +34,14 @@ Use the full runbook, including RDS snapshot, verification, and backout:
 
 [docs/PRODUCTION-UPGRADE-26.7.3.md](docs/PRODUCTION-UPGRADE-26.7.3.md)
 
+Schema inspect/convert (run via ECS one-off; RDS is private):
+
+```bash
+./scripts/run-mysql-oneoff.sh inspect
+DRY_RUN=1 ./scripts/run-mysql-oneoff.sh convert
+DROP_PARTIAL_VCRED=1 ./scripts/run-mysql-oneoff.sh convert
+```
+
 # Manual Deployment 
 ```bash
 # Single linux/amd64 image (no attestation sub-images in ECR)

@@ -20,6 +20,15 @@ Treat the Keycloak database as sensitive (usernames, emails, realm config). Keep
 
 **Prerequisite:** the new image tag is already in production ECR. Record it on the worksheet as `IMAGE_TAG`.
 
+Keycloak 26.7 applies most DDL itself via Liquibase on first boot. The only **manual** schema work is aligning table charset/collation so those migrations can add foreign keys. Scripts:
+
+| File | Purpose |
+| --- | --- |
+| [`scripts/sql/inspect-schema.sql`](../scripts/sql/inspect-schema.sql) | Read-only SQL if you already have a MySQL client on the VPC |
+| [`scripts/inspect-keycloak-schema.sh`](../scripts/inspect-keycloak-schema.sh) | Same inspect, as a shell script (`MYSQL_*` env) |
+| [`scripts/convert-keycloak-charset.sh`](../scripts/convert-keycloak-charset.sh) | Convert every table to the database default charset/collation |
+| [`scripts/run-mysql-oneoff.sh`](../scripts/run-mysql-oneoff.sh) | Run inspect or convert as a one-off ECS task (RDS is not public) |
+
 ---
 
 ## 2. Production worksheet
@@ -216,29 +225,16 @@ You do not have to restore now. Confirm the restore command you will use if Phas
 
 ## 6. Phase 2 — Inspect production schema (read-only)
 
-RDS is not public. Run a short-lived MySQL client task on the **same cluster / AZ / security-group path** Keycloak already uses. Reuse Keycloak’s DB host, database, and username from the current task definition (do not print the password).
+RDS is not public. From this repo, on a machine with AWS access to the production account:
 
-Inspect only aggregates — not user rows:
-
-```sql
-SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
-FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = DATABASE();
-
-SELECT TABLE_COLLATION, COUNT(*) AS tables
-FROM information_schema.TABLES
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'
-GROUP BY TABLE_COLLATION;
-
-SELECT COLUMN_NAME
-FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = DATABASE()
-  AND TABLE_NAME = 'KEYCLOAK_GROUP'
-  AND COLUMN_NAME = 'ORG_ID';
-
-SELECT ID FROM DATABASECHANGELOG
-WHERE ID LIKE '26.6.0%' OR ID LIKE '26.7.0%'
-ORDER BY DATEEXECUTED;
+```bash
+AWS_PROFILE="$AWS_PROFILE" CLUSTER="$CLUSTER" TD_FAMILY="$TD_FAMILY" LOG_GROUP="$LOG_GROUP" \
+  ./scripts/run-mysql-oneoff.sh inspect
 ```
+
+That copies DB settings from the current Keycloak task definition (does not print the password) and runs [`scripts/inspect-keycloak-schema.sh`](../scripts/inspect-keycloak-schema.sh). Logs should end with `INSPECT_DONE`.
+
+If you already have `mysql` on the VPC, run [`scripts/sql/inspect-schema.sql`](../scripts/sql/inspect-schema.sql) instead — aggregates only, no user rows.
 
 **Check / decide:**
 
@@ -288,36 +284,30 @@ Only if Phase 2 showed a mismatch. Target collation must be the **database defau
 
 ### 4.1 Convert
 
-Run a one-off ECS task (same pattern as sandbox `tmp-ersd-mysql-charset`) with a script equivalent to:
+Dry-run first (prints `ALTER TABLE ... CONVERT TO CHARACTER SET` using the **schema default** collation from Phase 2 — do not hardcode `utf8mb4_unicode_ci` if the default is `utf8mb4_0900_ai_ci`):
 
 ```bash
-set -euo pipefail
-mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" --database="$MYSQL_DATABASE" \
-  --batch --skip-column-names -e \
-  "SELECT TABLE_COLLATION, COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' GROUP BY TABLE_COLLATION;"
-
-mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" --database="$MYSQL_DATABASE" \
-  --batch --skip-column-names -e \
-  "SELECT CONCAT('ALTER TABLE \`', TABLE_NAME, '\` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' AND TABLE_COLLATION <> 'utf8mb4_0900_ai_ci';" \
-  > /tmp/alters.sql
-
-wc -l /tmp/alters.sql
-{ echo 'SET FOREIGN_KEY_CHECKS=0;'; cat /tmp/alters.sql; echo 'SET FOREIGN_KEY_CHECKS=1;'; } > /tmp/run.sql
-mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" --database="$MYSQL_DATABASE" < /tmp/run.sql
-
-# Only if a prior failed 26.7 start created this table without the FK:
-mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" --database="$MYSQL_DATABASE" \
-  -e "DROP TABLE IF EXISTS USER_VER_CREDENTIAL;"
-
-mysql --host="$MYSQL_HOST" --user="$MYSQL_USER" --database="$MYSQL_DATABASE" \
-  --batch --skip-column-names -e \
-  "SELECT TABLE_COLLATION, COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' GROUP BY TABLE_COLLATION;"
-echo CHARSET_FIX_DONE
+AWS_PROFILE="$AWS_PROFILE" CLUSTER="$CLUSTER" TD_FAMILY="$TD_FAMILY" LOG_GROUP="$LOG_GROUP" \
+  DRY_RUN=1 ./scripts/run-mysql-oneoff.sh convert
 ```
 
-Replace `utf8mb4_0900_ai_ci` with the actual `DEFAULT_COLLATION_NAME` from Phase 2 if it differs.
+Apply (Keycloak must already be scaled to 0). If a prior failed 26.7 start left `USER_VER_CREDENTIAL` without a Liquibase row, also set `DROP_PARTIAL_VCRED=1`:
 
-Do not print `MYSQL_PWD`. Deregister the one-off task definition after the run.
+```bash
+AWS_PROFILE="$AWS_PROFILE" CLUSTER="$CLUSTER" TD_FAMILY="$TD_FAMILY" LOG_GROUP="$LOG_GROUP" \
+  DROP_PARTIAL_VCRED=1 ./scripts/run-mysql-oneoff.sh convert
+```
+
+The runner executes [`scripts/convert-keycloak-charset.sh`](../scripts/convert-keycloak-charset.sh) and deregisters the one-off task definition. Do not print `MYSQL_PWD`.
+
+If you have `mysql` on the VPC instead:
+
+```bash
+export MYSQL_HOST=... MYSQL_USER=... MYSQL_DATABASE=keycloak
+# MYSQL_PWD is read by the mysql client; do not echo it
+DRY_RUN=1 ./scripts/convert-keycloak-charset.sh
+DROP_PARTIAL_VCRED=1 ./scripts/convert-keycloak-charset.sh
+```
 
 ### 4.2 Verify conversion
 
