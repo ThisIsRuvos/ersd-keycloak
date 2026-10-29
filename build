@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Single linux/amd64 image, no Buildx attestation/SBOM index.
+# Those extra "unknown/unknown" manifests show up as ECR sub-images and
+# break copying the tag into production.
+set -euo pipefail
+
+TAG="${1:-26.7.3}"
+ECR_REPO="${ECR_REPO:-703861148810.dkr.ecr.us-east-1.amazonaws.com/ersd/ersd-keycloak}"
+
+docker build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --sbom=false \
+  -t "ersd-keycloak:${TAG}" \
+  -t "${ECR_REPO}:${TAG}" \
+  .

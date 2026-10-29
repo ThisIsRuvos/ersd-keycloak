@@ -2,7 +2,7 @@ services:
 
   kcdb:
     image: mysql:8.0.23
-    # platform: linux/x86_64
+    platform: linux/amd64
     container_name: ersd_kcdb
     volumes:
       - kcdb_data:/var/lib/mysql
@@ -15,10 +15,25 @@ services:
       - 3306:3306
     expose:
       - 3306
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${KEYCLOAK_DB_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
   keycloak:
     container_name: ersd_keycloak
+    image: ersd-keycloak:26.7.3
+    platform: linux/amd64
     build:
+      context: .
       dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+      provenance: false
+      sbom: false
+    depends_on:
+      kcdb:
+        condition: service_healthy
     environment:
       KC_DB: mysql
       KC_DB_URL_HOST: kcdb
