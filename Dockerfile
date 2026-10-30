@@ -105,7 +105,16 @@ if trust list --filter=ca-anchors | grep -E 'emSign ECC Root CA - G3|Comodo AAA 
   exit 1
 fi
 
-aliases=$(chroot /mnt/rootfs /usr/bin/keytool -list -cacerts -storepass changeit)
+# /usr/bin/keytool is a symlink into the JDK. This chroot has no /proc, so
+# glibc resolves $ORIGIN from the symlink path (/usr/bin) and cannot find
+# libjli. Call the real binary and point the loader at its lib directory.
+jvm=$(echo /mnt/rootfs/usr/lib/jvm/java-21-openjdk-*)
+rel=${jvm#/mnt/rootfs}
+if [ ! -x "$jvm/bin/keytool" ] || [ ! -e "$jvm/lib/libjli.so" ]; then
+  echo "Keycloak JDK keytool or libjli is missing" >&2
+  exit 1
+fi
+aliases=$(LD_LIBRARY_PATH="${rel}/lib" chroot /mnt/rootfs "${rel}/bin/keytool" -list -cacerts -storepass changeit)
 if printf '%s\n' "$aliases" | grep -q 'emsigneccrootca-g3'; then
   echo "emSign ECC Root CA - G3 is still in Java cacerts" >&2
   exit 1
