@@ -1,0 +1,334 @@
+include:
+  # Assume roles
+  - project: aphl_aims/devsecops/centralized-cicd
+    ref: stable
+    file:
+      - gitlab-ci-templates/iam-oidc/aws-assume.yaml
+  # Same SecOps image scan used by ecr-on-fhir / rckms / ersd
+  - template: Security/Container-Scanning.gitlab-ci.yml
+
+stages:
+  - lint
+  - validate
+  - test
+  - build
+  - scan
+  - deploy
+  - deploy-production
+
+# Account, region, and repository names are project CI/CD variables, not literals:
+#   AWS_DEFAULT_REGION, AWS_CICD_ROLE
+#   SANDBOX_AWS_ACCOUNT_ID, SANDBOX_ECR_REPO
+#   PROD_AWS_ACCOUNT_ID, PROD_ECR_REPO
+# AWS_CICD_ROLE is inherited. The others are set on this project.
+# Tags are not protected, so these variables must stay unprotected.
+variables:
+  ECR_REPO: $SANDBOX_ECR_REPO
+  DOCKER_HOST: "tcp://docker:2375"
+
+########################################################################################################################
+# Templates that are run against each account
+########################################################################################################################
+
+.image_setup:
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.com
+  tags:
+    - saas-linux-large-amd64
+  image: docker:24
+  services:
+    - name: docker:24-dind
+  before_script:
+    - apk update
+    - apk upgrade --no-cache
+    - apk add aws-cli
+
+# Assume the target account role, resolve the registry, and log in to ECR.
+# Exports ECR_REGISTRY, BUILD_IMAGE (immutable, commit-scoped) and RELEASE_IMAGE
+# (the version tag consumed by the environment — no commit hash).
+.ecr_login:
+  script:
+    - |
+      echo "Debugging information"
+      printf "%80s\n" | tr ' ' '-'
+      aws --version
+      docker --version
+      echo
+      if ! printf '%s' "${TARGET_AWS_ACCOUNT_ID}" | grep -Eq '^[0-9]{12}$'; then
+        echo "TARGET_AWS_ACCOUNT_ID is missing. Set SANDBOX_AWS_ACCOUNT_ID or PROD_AWS_ACCOUNT_ID in Settings > CI/CD > Variables."
+        exit 1
+      fi
+      if [ -z "${AWS_DEFAULT_REGION}" ] || [ -z "${ECR_REPO}" ] || [ -z "${AWS_CICD_ROLE}" ]; then
+        echo "Missing CI/CD variable. Required: AWS_DEFAULT_REGION, ECR_REPO (from SANDBOX_ECR_REPO), AWS_CICD_ROLE."
+        exit 1
+      fi
+    - export AWS_ACCOUNT_ID=${TARGET_AWS_ACCOUNT_ID}
+    - !reference [.assume_role]
+    - export ECR_REGISTRY="${TARGET_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - export BUILD_IMAGE="${ECR_REGISTRY}/${ECR_REPO}:${CI_COMMIT_TAG}-${CI_COMMIT_SHORT_SHA}"
+    - export RELEASE_IMAGE="${ECR_REGISTRY}/${ECR_REPO}:${CI_COMMIT_TAG}"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION |
+        docker login --username AWS --password-stdin $ECR_REGISTRY
+
+# Promote an already-built release image from the source account registry into the
+# target account registry (pull -> retag -> push). Assumes a role in each account.
+# SOURCE_ECR_REPO / TARGET_ECR_REPO default to ECR_REPO when unset.
+.promote_image:
+  script:
+    - |
+      echo "Debugging information"
+      printf "%80s\n" | tr ' ' '-'
+      aws --version
+      docker --version
+      echo
+      if ! printf '%s' "${SOURCE_AWS_ACCOUNT_ID}" | grep -Eq '^[0-9]{12}$' \
+        || ! printf '%s' "${TARGET_AWS_ACCOUNT_ID}" | grep -Eq '^[0-9]{12}$'; then
+        echo "Promotion account IDs are missing. Set SANDBOX_AWS_ACCOUNT_ID and PROD_AWS_ACCOUNT_ID in Settings > CI/CD > Variables."
+        exit 1
+      fi
+      if [ -z "${SOURCE_ECR_REPO}" ] || [ -z "${TARGET_ECR_REPO}" ] || [ -z "${AWS_DEFAULT_REGION}" ] || [ -z "${AWS_CICD_ROLE}" ]; then
+        echo "Missing CI/CD variable. Required: SANDBOX_ECR_REPO, PROD_ECR_REPO, AWS_DEFAULT_REGION, AWS_CICD_ROLE."
+        exit 1
+      fi
+    - export SOURCE_ECR_REPO="${SOURCE_ECR_REPO:-$ECR_REPO}"
+    - export TARGET_ECR_REPO="${TARGET_ECR_REPO:-$ECR_REPO}"
+    # Log in to the source (sandbox) registry and pull the release image
+    - export AWS_ACCOUNT_ID=${SOURCE_AWS_ACCOUNT_ID}
+    - !reference [.assume_role]
+    - SOURCE_REGISTRY="${SOURCE_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION |
+        docker login --username AWS --password-stdin $SOURCE_REGISTRY
+    - SOURCE_IMAGE="${SOURCE_REGISTRY}/${SOURCE_ECR_REPO}:${CI_COMMIT_TAG}"
+    - echo "Pulling ${SOURCE_IMAGE} from source account ${SOURCE_AWS_ACCOUNT_ID}"
+    - docker pull -q --platform linux/amd64 "$SOURCE_IMAGE"
+    # Log in to the target (production) registry
+    - export AWS_ACCOUNT_ID=${TARGET_AWS_ACCOUNT_ID}
+    - !reference [.assume_role]
+    - TARGET_REGISTRY="${TARGET_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION |
+        docker login --username AWS --password-stdin $TARGET_REGISTRY
+    - TARGET_IMAGE="${TARGET_REGISTRY}/${TARGET_ECR_REPO}:${CI_COMMIT_TAG}"
+    # Promote only if the tag is missing from the target registry
+    - echo "Promoting ${SOURCE_ECR_REPO}:${CI_COMMIT_TAG} -> ${TARGET_ECR_REPO}:${CI_COMMIT_TAG} in ${TARGET_ENVIRONMENT} (${TARGET_AWS_ACCOUNT_ID})"
+    - |
+      printf "%80s\n" | tr ' ' '-'
+      echo "Checking for image ${TARGET_ECR_REPO}:${CI_COMMIT_TAG} in target ECR"
+      if docker manifest inspect "$TARGET_IMAGE" > /dev/null 2>&1; then
+        echo "Image $TARGET_IMAGE exists. No Actions needed"
+      else
+        echo "Image $TARGET_IMAGE does not exist. Promoting build image"
+        echo ""
+        echo "Tagging and pushing $TARGET_IMAGE"
+        echo -n "  "
+        docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
+        echo -n "  "
+        docker push "$TARGET_IMAGE"
+        echo "  Complete"
+      fi
+
+.shell_job:
+  image: alpine:3.22
+  tags:
+    - saas-linux-large-amd64
+  before_script:
+    - apk add --no-cache bash
+
+########################################################################################################################
+# Quality gates before any image build.
+# This repo is a Keycloak image, so the gates check the shell entrypoint,
+# the Dockerfile, and the configure script instead of an npm test suite.
+########################################################################################################################
+
+Lint:
+  stage: lint
+  extends:
+    - .shell_job
+  before_script:
+    - apk add --no-cache bash curl shellcheck
+    - curl -fsSL -o /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+    - chmod +x /usr/local/bin/hadolint
+  script:
+    - shellcheck -S error configure
+    - hadolint --failure-threshold error Dockerfile
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+Validate:
+  stage: validate
+  extends:
+    - .shell_job
+  script:
+    - bash -n configure
+    - test -s Dockerfile
+    - test -d themes
+    - grep -q 'COPY ./themes/' Dockerfile
+    - grep -Fq 'ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start"]' Dockerfile
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+Test:
+  stage: test
+  extends:
+    - .shell_job
+  script:
+    - |
+      if bash configure </dev/null > /tmp/configure.out 2>&1; then
+        echo "configure should exit when jq is not installed"
+        exit 1
+      fi
+      grep -q 'jq required' /tmp/configure.out
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+########################################################################################################################
+# Build stage: build the image and push it to ECR under an immutable, commit-scoped tag
+########################################################################################################################
+
+Build image for sandbox:
+  stage: build
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE != "web" && $environment != "production"'
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE == "web" && $environment == "sandbox"'
+  variables:
+    TARGET_AWS_ACCOUNT_ID: $SANDBOX_AWS_ACCOUNT_ID
+    TARGET_ENVIRONMENT: sandbox
+  needs:
+    - Lint
+    - Validate
+    - Test
+  extends:
+    - .image_setup
+  script:
+    - !reference [.ecr_login, script]
+    - echo "Building and pushing ${BUILD_IMAGE} to ${TARGET_ENVIRONMENT} registry in account ${TARGET_AWS_ACCOUNT_ID}"
+    - printf "%80s\n" | tr ' ' '-'
+    # Single linux/amd64 manifest. Attestation indexes show up as extra ECR images.
+    - docker build --platform linux/amd64 --provenance=false --sbom=false -t "$BUILD_IMAGE" .
+    - docker push "$BUILD_IMAGE"
+
+########################################################################################################################
+# SecOps: GitLab container scanning of the sandbox build image (ECR)
+# Pattern matches aphl_aims/fhir/ecr-on-fhir, aphl_aims/rckms/*, and ersd:
+#   include Security/Container-Scanning.gitlab-ci.yml and override container_scanning.
+# Image lives in private ECR, so a prepare job uses the existing OIDC assume-role
+# to mint CS_REGISTRY_* credentials for the analyzer.
+########################################################################################################################
+
+Prepare container scan:
+  stage: scan
+  extends:
+    - .image_setup
+  needs:
+    - "Build image for sandbox"
+  variables:
+    TARGET_AWS_ACCOUNT_ID: $SANDBOX_AWS_ACCOUNT_ID
+    TARGET_ENVIRONMENT: sandbox
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE != "web" && $environment != "production"'
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE == "web" && $environment == "sandbox"'
+  script:
+    - export AWS_ACCOUNT_ID=${TARGET_AWS_ACCOUNT_ID}
+    - !reference [.assume_role]
+    - |
+      SCAN_IMAGE="${TARGET_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${CI_COMMIT_TAG}-${CI_COMMIT_SHORT_SHA}"
+      echo "Scanning ${SCAN_IMAGE}"
+      {
+        echo "CS_REGISTRY_USER=AWS"
+        echo "CS_IMAGE=${SCAN_IMAGE}"
+        echo "CS_REGISTRY_PASSWORD=$(aws ecr get-login-password --region "${AWS_DEFAULT_REGION}")"
+      } > scan.env
+  artifacts:
+    reports:
+      dotenv: scan.env
+
+container_scanning:
+  stage: scan
+  needs:
+    - job: Prepare container scan
+      artifacts: true
+  dependencies:
+    - Prepare container scan
+  variables:
+    CS_REGISTRY_USER: AWS
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE != "web" && $environment != "production"'
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE == "web" && $environment == "sandbox"'
+
+########################################################################################################################
+# Deploy stage: promote the built image to the version tag (no commit hash)
+########################################################################################################################
+
+Deploy to sandbox:
+  stage: deploy
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE != "web" && $environment != "production"'
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(\.\d+)?$/ && $CI_PIPELINE_SOURCE == "web" && $environment == "sandbox"'
+  variables:
+    TARGET_AWS_ACCOUNT_ID: $SANDBOX_AWS_ACCOUNT_ID
+    TARGET_ENVIRONMENT: sandbox
+  needs:
+    - "Build image for sandbox"
+    - container_scanning
+  extends:
+    - .image_setup
+  script:
+    - !reference [.ecr_login, script]
+    - echo "Deploying ${ECR_REPO}:${CI_COMMIT_TAG} to ${TARGET_ENVIRONMENT} registry in account ${TARGET_AWS_ACCOUNT_ID}"
+    - |
+      printf "%80s\n" | tr ' ' '-'
+      echo "Checking for image ${ECR_REPO}:${CI_COMMIT_TAG} in target ECR"
+      if docker manifest inspect "$RELEASE_IMAGE" > /dev/null 2>&1; then
+        echo "Image $RELEASE_IMAGE exists. No Actions needed"
+      else
+        echo "Image $RELEASE_IMAGE does not exist. Promoting build image"
+        echo ""
+        echo "Pulling $BUILD_IMAGE"
+        echo -n "  "
+        docker pull -q --platform linux/amd64 "$BUILD_IMAGE"
+        echo "  Complete"
+        echo ""
+        echo "Tagging and pushing $RELEASE_IMAGE"
+        echo -n "  "
+        docker tag "$BUILD_IMAGE" "$RELEASE_IMAGE"
+        echo -n "  "
+        docker push "$RELEASE_IMAGE"
+        echo "  Complete"
+      fi
+
+########################################################################################################################
+# Production stage: promote the sandbox release image into the production account (manual, web-triggered)
+#
+# Trigger from GitLab: Build -> Pipelines -> New pipeline on a three-part tag,
+# with pipeline variable environment = production. The API create-pipeline
+# call is accepted as well, with the same variable.
+# Source account and repository: SANDBOX_AWS_ACCOUNT_ID / SANDBOX_ECR_REPO
+# Target account and repository: PROD_AWS_ACCOUNT_ID / PROD_ECR_REPO
+#
+# Production accepts only three-part tags (x.y.z). Four-part tags (x.y.z.n) are
+# for sandbox testing only and will not promote to production.
+# A production pipeline skips the sandbox build and scan. Those ECR tags are
+# immutable, and a second push of the same tag fails the promotion.
+########################################################################################################################
+
+Promote to production:
+  stage: deploy-production
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/ && ($CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api") && $environment == "production"'
+  variables:
+    SOURCE_AWS_ACCOUNT_ID: $SANDBOX_AWS_ACCOUNT_ID
+    SOURCE_ECR_REPO: $SANDBOX_ECR_REPO
+    TARGET_AWS_ACCOUNT_ID: $PROD_AWS_ACCOUNT_ID
+    TARGET_ECR_REPO: $PROD_ECR_REPO
+    TARGET_ENVIRONMENT: production
+  extends:
+    - .image_setup
+  script:
+    - !reference [.promote_image, script]
