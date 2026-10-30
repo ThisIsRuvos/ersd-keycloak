@@ -30,4 +30,16 @@ jobs:
           GIT_SSH_COMMAND: "ssh -i ~/.ssh/gitlab_deploy_key -o IdentitiesOnly=yes"
         run: |
           git remote add gitlab git@gitlab.com:aphl_aims/devteam/ersd-keycloak.git || true
-          git push gitlab refs/remotes/origin/master:refs/heads/master --tags --force
+          git fetch gitlab master
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          # Protected master rejects force pushes. Fast-forward when GitHub is
+          # ahead; otherwise merge GitHub master in so the push stays a fast-forward.
+          if git merge-base --is-ancestor refs/remotes/gitlab/master refs/remotes/origin/master; then
+            git push gitlab refs/remotes/origin/master:refs/heads/master
+          else
+            git checkout --detach refs/remotes/gitlab/master
+            git merge --no-ff refs/remotes/origin/master -m "Mirror GitHub master"
+            git push gitlab HEAD:refs/heads/master
+          fi
+          git push gitlab --tags
