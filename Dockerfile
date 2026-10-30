@@ -13,8 +13,15 @@ COPY --from=quay.io/keycloak/keycloak:26.7.3 / /mnt/rootfs
 
 RUN <<'EOS'
 set -euo pipefail
+# Leave the Keycloak JDK alone. A newer java-21-openjdk-headless pulls
+# packages whose scriptlets need rpm, which UBI micro does not have, and
+# that leaves keytool unable to load libjli. The OS errata below do not
+# require that upgrade.
 dnf -y upgrade --installroot /mnt/rootfs --releasever 9 \
-    --setopt=install_weak_deps=0 --nodocs
+    --setopt=install_weak_deps=0 --nodocs \
+    --exclude=java-21-openjdk-headless \
+    --exclude=java-21-openjdk \
+    --exclude=copy-jdk-configs
 dnf -y install zip unzip python3
 dnf clean all --installroot /mnt/rootfs
 rm -rf /mnt/rootfs/var/cache/dnf /mnt/rootfs/var/log/dnf* /mnt/rootfs/var/log/yum*
