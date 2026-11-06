@@ -22,7 +22,7 @@ services:
       retries: 20
   keycloak:
     container_name: ersd_keycloak
-    image: ersd-keycloak:26.7.3
+    image: ersd-keycloak:26.8.2
     platform: linux/amd64
     build:
       context: .

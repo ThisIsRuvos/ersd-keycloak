@@ -4,7 +4,7 @@
 # break copying the tag into production.
 set -euo pipefail
 
-TAG="${1:-26.7.3}"
+TAG="${1:-26.8.2}"
 ECR_REPO="${ECR_REPO:-703861148810.dkr.ecr.us-east-1.amazonaws.com/ersd/ersd-keycloak}"
 
 docker build \

@@ -45,7 +45,7 @@ DROP_PARTIAL_VCRED=1 ./scripts/run-mysql-oneoff.sh convert
 # Manual Deployment 
 ```bash
 # Single linux/amd64 image (no attestation sub-images in ECR)
-./build 26.7.3
+./build 26.8.2
 
 # Retrieve an authentication token and authenticate your Docker client to your registry. Use the AWS CLI:
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 703861148810.dkr.ecr.us-east-1.amazonaws.com
